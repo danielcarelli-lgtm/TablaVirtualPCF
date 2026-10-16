@@ -11,19 +11,24 @@ export interface ITablaDobleEntradaProps {
 
 type CategoryType = "SE" | "PCI";
 type ExpirationStatus = "sinRiesgo" | "enRiesgo" | "caducadas" | "sinFecha";
+type OpenMenuType = "type" | "province" | "city" | null;
 
 interface IWorkOrderRecord {
     id: string;
     name: string;
     jobNo: string;
     zone: string;
+    territoryId: string | null;
+    territoryName: string;
+    province: string;
+    city: string;
     workOrderTypeId: string;
     workOrderTypeName: string;
     seOrPci: CategoryType;
     systemStatus: string;
     subStatus: string;
     serviceAccount: string;
-    city: string;
+    estimatedDuration: number;
     pdw_mmexpirationdate?: string | null;
     msdyn_timetopromised?: string | null;
 }
@@ -37,6 +42,17 @@ interface IWorkOrderEvaluated extends IWorkOrderRecord {
 interface IFilterOption {
     key: string;
     text: string;
+}
+
+interface IResourceOption {
+    resourceId: string;
+    resourceName: string;
+    territoryName: string;
+}
+
+interface IBookingStatusOption {
+    statusId: string;
+    statusName: string;
 }
 
 interface IStatusBucket {
@@ -86,13 +102,26 @@ const createEmptyBucket = (): IStatusBucket => ({
     sinFecha: 0
 });
 
+const cleanGuid = (rawGuid: string | null | undefined): string => {
+    if (!rawGuid) return "";
+    return rawGuid.replace(/[{}]/g, "").trim();
+};
+
 const getEntityString = (entity: object, propertyName: string): string | undefined => {
     const val: unknown = Reflect.get(entity, propertyName);
     if (typeof val === "string" && val.trim().length > 0) {
-        return val;
+        return val.trim();
     }
     if (typeof val === "number" || typeof val === "boolean") {
         return String(val);
+    }
+    return undefined;
+};
+
+const getEntityNumber = (entity: object, propertyName: string): number | undefined => {
+    const val: unknown = Reflect.get(entity, propertyName);
+    if (typeof val === "number" && !isNaN(val)) {
+        return val;
     }
     return undefined;
 };
@@ -130,7 +159,7 @@ const formatUnknownError = (err: unknown): { message: string; details: string } 
         return { message: err, details: err };
     }
     return {
-        message: "Error desconocido al invocar context.webAPI.retrieveMultipleRecords",
+        message: "Error desconocido al invocar WebAPI",
         details: "Sin detalles adicionales"
     };
 };
@@ -143,6 +172,18 @@ const formatDateDisplay = (isoDate: string | null): string => {
     const month = String(d.getMonth() + 1).padStart(2, "0");
     const year = d.getFullYear();
     return `${day}/${month}/${year}`;
+};
+
+const getDefaultBookingDateTimeLocal = (): string => {
+    const d = new Date();
+    d.setDate(d.getDate() + 1);
+    d.setHours(9, 0, 0, 0);
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    const hours = String(d.getHours()).padStart(2, "0");
+    const minutes = String(d.getMinutes()).padStart(2, "0");
+    return `${year}-${month}-${day}T${hours}:${minutes}`;
 };
 
 const generateMockWorkOrders = (): IWorkOrderRecord[] => {
@@ -169,6 +210,20 @@ const generateMockWorkOrders = (): IWorkOrderRecord[] => {
         { id: "type-instalacion", name: "Instalacion" }
     ];
 
+    const northLocations = [
+        { province: "Madrid", city: "Madrid" },
+        { province: "Madrid", city: "Alcobendas" },
+        { province: "Bizkaia", city: "Bilbao" },
+        { province: "Barcelona", city: "Barcelona" }
+    ];
+
+    const southLocations = [
+        { province: "Sevilla", city: "Sevilla" },
+        { province: "Sevilla", city: "Dos Hermanas" },
+        { province: "Malaga", city: "Malaga" },
+        { province: "Valencia", city: "Valencia" }
+    ];
+
     const clients = [
         "Securitas Direct Espana",
         "Logistica Peninsular S.A.",
@@ -186,18 +241,26 @@ const generateMockWorkOrders = (): IWorkOrderRecord[] => {
         for (let i = 0; i < count; i++) {
             const woType = workOrderTypes[counter % workOrderTypes.length];
             const client = clients[counter % clients.length];
+            const locList = zone === "Norte" ? northLocations : southLocations;
+            const loc = locList[counter % locList.length];
+            const territoryId = zone === "Norte" ? "mock-terr-norte" : "mock-terr-sur";
+
             records.push({
                 id: `mock-${counter}`,
                 name: `OT-${10000 + counter}`,
                 jobNo: `JOB-${5000 + counter}`,
                 zone,
+                territoryId,
+                territoryName: zone,
+                province: loc.province,
+                city: loc.city,
                 workOrderTypeId: woType.id,
                 workOrderTypeName: woType.name,
                 seOrPci,
-                systemStatus: status === "caducadas" ? "En curso" : "Programada",
-                subStatus: status === "caducadas" ? "Pendiente Material" : "Asignada",
+                systemStatus: "Sin programar",
+                subStatus: "Pendiente Asignacion",
                 serviceAccount: client,
-                city: zone === "Norte" ? "Madrid" : "Sevilla",
+                estimatedDuration: 60,
                 pdw_mmexpirationdate: dateByStatus[status],
                 msdyn_timetopromised: dateByStatus[status]
             });
@@ -237,7 +300,10 @@ export const TablaDobleEntrada: React.FC<ITablaDobleEntradaProps> = ({
 }) => {
     const [workOrders, setWorkOrders] = React.useState<IWorkOrderRecord[]>([]);
     const [selectedTypes, setSelectedTypes] = React.useState<string[]>([]);
-    const [isDropdownOpen, setIsDropdownOpen] = React.useState<boolean>(false);
+    const [selectedProvinces, setSelectedProvinces] = React.useState<string[]>([]);
+    const [selectedCities, setSelectedCities] = React.useState<string[]>([]);
+    const [openMenu, setOpenMenu] = React.useState<OpenMenuType>(null);
+
     const [isLoading, setIsLoading] = React.useState<boolean>(true);
     const [isMockData, setIsMockData] = React.useState<boolean>(false);
 
@@ -249,12 +315,27 @@ export const TablaDobleEntrada: React.FC<ITablaDobleEntradaProps> = ({
     const [drillDown, setDrillDown] = React.useState<IDrillDownSelection | null>(null);
     const [drillSearch, setDrillSearch] = React.useState<string>("");
 
-    const dropdownRef = React.useRef<HTMLDivElement | null>(null);
+    // Estado para Popup Anidado de Reserva (Booking)
+    const [bookingWo, setBookingWo] = React.useState<IWorkOrderEvaluated | null>(null);
+    const [territoryResources, setTerritoryResources] = React.useState<IResourceOption[]>([]);
+    const [bookingStatuses, setBookingStatuses] = React.useState<IBookingStatusOption[]>([]);
+    const [selectedResourceId, setSelectedResourceId] = React.useState<string>("");
+    const [selectedBookingStatusId, setSelectedBookingStatusId] = React.useState<string>("");
+    const [bookingDateTime, setBookingDateTime] = React.useState<string>("");
+    const [bookingDuration, setBookingDuration] = React.useState<number>(60);
+    const [isLoadingResources, setIsLoadingResources] = React.useState<boolean>(false);
+    const [isCreatingBooking, setIsCreatingBooking] = React.useState<boolean>(false);
+    const [bookingFeedback, setBookingFeedback] = React.useState<{
+        type: "success" | "error";
+        message: string;
+    } | null>(null);
+
+    const filterBarRef = React.useRef<HTMLDivElement | null>(null);
 
     React.useEffect(() => {
         const handleClickOutside = (event: MouseEvent): void => {
-            if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
-                setIsDropdownOpen(false);
+            if (filterBarRef.current && !filterBarRef.current.contains(event.target as Node)) {
+                setOpenMenu(null);
             }
         };
         document.addEventListener("mousedown", handleClickOutside);
@@ -263,7 +344,6 @@ export const TablaDobleEntrada: React.FC<ITablaDobleEntradaProps> = ({
         };
     }, []);
 
-    // Evalua fecha objetivo, dias restantes y estado segun tu regla de negocio
     const evaluateRecord = React.useCallback(
         (entity: IWorkOrderRecord): IWorkOrderEvaluated => {
             const hasSpainDate = Boolean(entity.pdw_mmexpirationdate);
@@ -321,6 +401,11 @@ export const TablaDobleEntrada: React.FC<ITablaDobleEntradaProps> = ({
             return entities.map((ent: unknown, idx: number) => {
                 const rawEnt = ent as object;
 
+                const territoryId =
+                    getEntityString(rawEnt, "_msdyn_serviceterritory_value") ?? null;
+                const territoryName =
+                    getEntityString(rawEnt, defaultTerritoryKey) ?? "Sin Territorio";
+
                 const zoneName =
                     getEntityString(rawEnt, formattedZoneKey) ??
                     getEntityString(rawEnt, zoneFieldLogicalName) ??
@@ -328,6 +413,10 @@ export const TablaDobleEntrada: React.FC<ITablaDobleEntradaProps> = ({
                     getEntityString(rawEnt, "msdyn_stateorprovince") ??
                     getEntityString(rawEnt, formattedBuKey) ??
                     "Sin Zona";
+
+                const province =
+                    getEntityString(rawEnt, "msdyn_stateorprovince") ?? "Sin Provincia";
+                const city = getEntityString(rawEnt, "msdyn_city") ?? "Sin Ciudad";
 
                 const typeId =
                     getEntityString(rawEnt, "_msdyn_workordertype_value") ?? "sin-tipo";
@@ -341,18 +430,27 @@ export const TablaDobleEntrada: React.FC<ITablaDobleEntradaProps> = ({
                 ).toUpperCase();
                 const seOrPci: CategoryType = rawSePci.includes("PCI") ? "PCI" : "SE";
 
+                const duration =
+                    getEntityNumber(rawEnt, "msdyn_totalestimatedduration") ??
+                    getEntityNumber(rawEnt, "msdyn_primaryincidentestimatedduration") ??
+                    60;
+
                 return {
                     id: getEntityString(rawEnt, "msdyn_workorderid") ?? `row-${idx}`,
                     name: getEntityString(rawEnt, "msdyn_name") ?? `OT-${idx + 1}`,
                     jobNo: getEntityString(rawEnt, "pdw_mmjobno") ?? "-",
                     zone: zoneName,
+                    territoryId,
+                    territoryName,
+                    province,
+                    city,
                     workOrderTypeId: typeId,
                     workOrderTypeName: typeName,
                     seOrPci,
                     systemStatus:
                         getEntityString(rawEnt, formattedSysStatusKey) ??
                         getEntityString(rawEnt, "msdyn_systemstatus") ??
-                        "-",
+                        "Sin programar",
                     subStatus:
                         getEntityString(rawEnt, formattedSubStatusKey) ??
                         getEntityString(rawEnt, "_msdyn_substatus_value") ??
@@ -361,7 +459,7 @@ export const TablaDobleEntrada: React.FC<ITablaDobleEntradaProps> = ({
                         getEntityString(rawEnt, formattedAccountKey) ??
                         getEntityString(rawEnt, "_msdyn_serviceaccount_value") ??
                         "-",
-                    city: getEntityString(rawEnt, "msdyn_city") ?? "-",
+                    estimatedDuration: duration > 0 ? duration : 60,
                     pdw_mmexpirationdate:
                         getEntityString(rawEnt, "pdw_mmexpirationdate") ?? null,
                     msdyn_timetopromised:
@@ -390,14 +488,17 @@ export const TablaDobleEntrada: React.FC<ITablaDobleEntradaProps> = ({
             "_owningbusinessunit_value",
             "msdyn_systemstatus",
             "_msdyn_substatus_value",
-            "_msdyn_serviceaccount_value"
+            "_msdyn_serviceaccount_value",
+            "msdyn_totalestimatedduration",
+            "msdyn_primaryincidentestimatedduration"
         ];
 
         if (!baseSelectFields.includes(zoneFieldLogicalName)) {
             baseSelectFields.push(zoneFieldLogicalName);
         }
 
-        const primaryQuery = `?$select=${baseSelectFields.join(",")}&$filter=statecode eq 0`;
+        // Filtro actualizado: statecode activo y msdyn_systemstatus igual a 690970000 (Sin programar)
+        const primaryQuery = `?$select=${baseSelectFields.join(",")}&$filter=statecode eq 0 and msdyn_systemstatus eq 690970000`;
 
         try {
             const response = await context.webAPI.retrieveMultipleRecords(
@@ -423,8 +524,7 @@ export const TablaDobleEntrada: React.FC<ITablaDobleEntradaProps> = ({
         } catch (primaryErr: unknown) {
             const formattedPrimaryErr = formatUnknownError(primaryErr);
 
-            // Intento secundario sin $select por si algun campo personalizado no existe en el entorno
-            const fallbackQuery = "?$filter=statecode eq 0&$top=500";
+            const fallbackQuery = "?$filter=statecode eq 0 and msdyn_systemstatus eq 690970000&$top=500";
             try {
                 const fallbackResponse = await context.webAPI.retrieveMultipleRecords(
                     "msdyn_workorder",
@@ -473,6 +573,7 @@ export const TablaDobleEntrada: React.FC<ITablaDobleEntradaProps> = ({
         void fetchWorkOrders();
     }, [fetchWorkOrders]);
 
+    // Opciones para Filtro 1: Tipo de Orden de Trabajo
     const workOrderTypeOptions: IFilterOption[] = React.useMemo(() => {
         const map = new Map<string, string>();
         workOrders.forEach((wo) => {
@@ -485,32 +586,78 @@ export const TablaDobleEntrada: React.FC<ITablaDobleEntradaProps> = ({
             .sort((a, b) => a.text.localeCompare(b.text));
     }, [workOrders]);
 
-    const toggleWorkOrderType = (key: string): void => {
-        setSelectedTypes((prev) =>
+    // Opciones para Filtro 2: Provincia
+    const provinceOptions: IFilterOption[] = React.useMemo(() => {
+        const set = new Set<string>();
+        workOrders.forEach((wo) => {
+            set.add(wo.province);
+        });
+        return Array.from(set)
+            .sort((a, b) => a.localeCompare(b))
+            .map((prov) => ({ key: prov, text: prov }));
+    }, [workOrders]);
+
+    // Opciones para Filtro 3: Ciudad (filtradas por las provincias seleccionadas si las hay)
+    const cityOptions: IFilterOption[] = React.useMemo(() => {
+        const set = new Set<string>();
+        workOrders.forEach((wo) => {
+            if (selectedProvinces.length === 0 || selectedProvinces.includes(wo.province)) {
+                set.add(wo.city);
+            }
+        });
+        return Array.from(set)
+            .sort((a, b) => a.localeCompare(b))
+            .map((city) => ({ key: city, text: city }));
+    }, [workOrders, selectedProvinces]);
+
+    const toggleSelection = (
+        key: string,
+        setter: React.Dispatch<React.SetStateAction<string[]>>
+    ): void => {
+        setter((prev) =>
             prev.includes(key)
                 ? prev.filter((itemKey) => itemKey !== key)
                 : [...prev, key]
         );
     };
 
-    const selectedSummaryText = React.useMemo(() => {
-        if (selectedTypes.length === 0) {
-            return "Tipo de Orden de trabajo (seleccion multiple)";
-        }
-        const names = workOrderTypeOptions
-            .filter((opt) => selectedTypes.includes(opt.key))
+    const getSummaryText = (
+        selectedKeys: string[],
+        options: IFilterOption[],
+        placeholder: string
+    ): string => {
+        if (selectedKeys.length === 0) return placeholder;
+        const names = options
+            .filter((opt) => selectedKeys.includes(opt.key))
             .map((opt) => opt.text);
-        return names.join(", ");
-    }, [selectedTypes, workOrderTypeOptions]);
+        return names.length > 0 ? names.join(", ") : placeholder;
+    };
 
-    // Ordenes evaluadas y filtradas por Tipo de OT
+    const clearAllFilters = (): void => {
+        setSelectedTypes([]);
+        setSelectedProvinces([]);
+        setSelectedCities([]);
+    };
+
+    const totalActiveFilters =
+        selectedTypes.length + selectedProvinces.length + selectedCities.length;
+
+    // Ordenes evaluadas y filtradas por Tipo de OT, Provincia y Ciudad
     const evaluatedWorkOrders: IWorkOrderEvaluated[] = React.useMemo(() => {
-        const list =
-            selectedTypes.length === 0
-                ? workOrders
-                : workOrders.filter((wo) => selectedTypes.includes(wo.workOrderTypeId));
-        return list.map((wo) => evaluateRecord(wo));
-    }, [workOrders, selectedTypes, evaluateRecord]);
+        const filtered = workOrders.filter((wo) => {
+            if (selectedTypes.length > 0 && !selectedTypes.includes(wo.workOrderTypeId)) {
+                return false;
+            }
+            if (selectedProvinces.length > 0 && !selectedProvinces.includes(wo.province)) {
+                return false;
+            }
+            if (selectedCities.length > 0 && !selectedCities.includes(wo.city)) {
+                return false;
+            }
+            return true;
+        });
+        return filtered.map((wo) => evaluateRecord(wo));
+    }, [workOrders, selectedTypes, selectedProvinces, selectedCities, evaluateRecord]);
 
     const { rows, totals } = React.useMemo(() => {
         const zoneMap = new Map<string, IZoneRowData>();
@@ -563,7 +710,7 @@ export const TablaDobleEntrada: React.FC<ITablaDobleEntradaProps> = ({
                 return false;
             }
             if (query.length > 0) {
-                const haystack = `${wo.name} ${wo.jobNo} ${wo.serviceAccount} ${wo.workOrderTypeName} ${wo.subStatus} ${wo.city}`.toLowerCase();
+                const haystack = `${wo.name} ${wo.jobNo} ${wo.serviceAccount} ${wo.workOrderTypeName} ${wo.subStatus} ${wo.province} ${wo.city}`.toLowerCase();
                 return haystack.includes(query);
             }
             return true;
@@ -600,6 +747,273 @@ export const TablaDobleEntrada: React.FC<ITablaDobleEntradaProps> = ({
         });
     };
 
+    // Carga los recursos del mismo msdyn_resourceterritory que la OT y los estados de reserva
+    const openBookingModal = async (wo: IWorkOrderEvaluated): Promise<void> => {
+        setBookingWo(wo);
+        setBookingDateTime(getDefaultBookingDateTimeLocal());
+        setBookingDuration(wo.estimatedDuration > 0 ? wo.estimatedDuration : 60);
+        setBookingFeedback(null);
+        setSelectedResourceId("");
+        setIsLoadingResources(true);
+
+        const territoryGuid = cleanGuid(wo.territoryId);
+
+        if (isMockData || wo.id.startsWith("mock-")) {
+            const mockRes: IResourceOption[] =
+                wo.zone === "Norte"
+                    ? [
+                          {
+                              resourceId: "mock-res-1",
+                              resourceName: "Carlos Martinez (Tecnico Norte)",
+                              territoryName: "Norte"
+                          },
+                          {
+                              resourceId: "mock-res-2",
+                              resourceName: "Laura Gomez (Especialista PCI Norte)",
+                              territoryName: "Norte"
+                          }
+                      ]
+                    : [
+                          {
+                              resourceId: "mock-res-3",
+                              resourceName: "Javier Ruiz (Tecnico Sur)",
+                              territoryName: "Sur"
+                          },
+                          {
+                              resourceId: "mock-res-4",
+                              resourceName: "Ana Fernandez (Especialista SE Sur)",
+                              territoryName: "Sur"
+                          }
+                      ];
+
+            const mockStatuses: IBookingStatusOption[] = [
+                { statusId: "mock-status-scheduled", statusName: "Programada (Scheduled)" }
+            ];
+
+            setTerritoryResources(mockRes);
+            setBookingStatuses(mockStatuses);
+            setSelectedResourceId(mockRes[0].resourceId);
+            setSelectedBookingStatusId(mockStatuses[0].statusId);
+            setIsLoadingResources(false);
+            return;
+        }
+
+        try {
+            const odataSuffix = "@OData.Community.Display.V1.FormattedValue";
+            const formattedResourceKey = `_msdyn_resource_value${odataSuffix}`;
+            const formattedTerritoryKey = `_msdyn_territory_value${odataSuffix}`;
+
+            const filterClause =
+                territoryGuid.length > 0
+                    ? `statecode eq 0 and _msdyn_territory_value eq ${territoryGuid}`
+                    : "statecode eq 0";
+
+            const rtQuery = `?$select=msdyn_resourceterritoryid,_msdyn_resource_value,_msdyn_territory_value,msdyn_name&$filter=${filterClause}`;
+
+            const [rtResponse, statusResponse] = await Promise.all([
+                context.webAPI.retrieveMultipleRecords("msdyn_resourceterritory", rtQuery),
+                context.webAPI.retrieveMultipleRecords(
+                    "bookingstatus",
+                    "?$select=bookingstatusid,name,msdyn_fieldservicestatus&$filter=statecode eq 0"
+                )
+            ]);
+
+            const resourceMap = new Map<string, IResourceOption>();
+            rtResponse.entities.forEach((ent: unknown) => {
+                const rawEnt = ent as object;
+                const resId = getEntityString(rawEnt, "_msdyn_resource_value");
+                if (resId && !resourceMap.has(resId)) {
+                    const resName =
+                        getEntityString(rawEnt, formattedResourceKey) ??
+                        getEntityString(rawEnt, "msdyn_name") ??
+                        resId;
+                    const terrName =
+                        getEntityString(rawEnt, formattedTerritoryKey) ?? wo.territoryName;
+
+                    resourceMap.set(resId, {
+                        resourceId: resId,
+                        resourceName: resName,
+                        territoryName: terrName
+                    });
+                }
+            });
+
+            const loadedResources = Array.from(resourceMap.values()).sort((a, b) =>
+                a.resourceName.localeCompare(b.resourceName)
+            );
+            setTerritoryResources(loadedResources);
+            if (loadedResources.length > 0) {
+                setSelectedResourceId(loadedResources[0].resourceId);
+            }
+
+            const loadedStatuses: IBookingStatusOption[] = [];
+            let preferredStatusId = "";
+
+            statusResponse.entities.forEach((ent: unknown) => {
+                const rawEnt = ent as object;
+                const stId = getEntityString(rawEnt, "bookingstatusid");
+                const stName = getEntityString(rawEnt, "name") ?? "Estado";
+                const fsStatus = getEntityNumber(rawEnt, "msdyn_fieldservicestatus");
+                if (stId) {
+                    loadedStatuses.push({ statusId: stId, statusName: stName });
+                    if (fsStatus === 690970000 && preferredStatusId === "") {
+                        preferredStatusId = stId;
+                    }
+                }
+            });
+
+            setBookingStatuses(loadedStatuses);
+            if (preferredStatusId.length > 0) {
+                setSelectedBookingStatusId(preferredStatusId);
+            } else if (loadedStatuses.length > 0) {
+                setSelectedBookingStatusId(loadedStatuses[0].statusId);
+            }
+        } catch (err: unknown) {
+            const formattedErr = formatUnknownError(err);
+            setBookingFeedback({
+                type: "error",
+                message: `Error al consultar msdyn_resourceterritory: ${formattedErr.message}`
+            });
+        } finally {
+            setIsLoadingResources(false);
+        }
+    };
+
+    const buildBookingPayload = (
+        workOrderNavProp: string,
+        resourceNavProp: string,
+        statusNavProp: string,
+        woName: string,
+        woGuid: string,
+        resGuid: string,
+        statusGuid: string,
+        startIso: string,
+        endIso: string,
+        durationMinutes: number
+    ): Record<string, unknown> => {
+        const payload: Record<string, unknown> = {};
+        Reflect.set(payload, "name", `Reserva - ${woName}`);
+        Reflect.set(payload, "starttime", startIso);
+        Reflect.set(payload, "endtime", endIso);
+        Reflect.set(payload, "duration", durationMinutes);
+        Reflect.set(payload, "bookingtype", 1);
+        Reflect.set(payload, `${resourceNavProp}@odata.bind`, `/bookableresources(${resGuid})`);
+        Reflect.set(payload, `${workOrderNavProp}@odata.bind`, `/msdyn_workorders(${woGuid})`);
+
+        if (statusGuid.length > 0) {
+            Reflect.set(payload, `${statusNavProp}@odata.bind`, `/bookingstatuses(${statusGuid})`);
+        }
+        return payload;
+    };
+
+    const handleCreateBooking = async (): Promise<void> => {
+        if (!bookingWo) return;
+
+        if (!selectedResourceId) {
+            setBookingFeedback({
+                type: "error",
+                message: "Debes seleccionar un recurso para crear la reserva."
+            });
+            return;
+        }
+
+        const startDate = new Date(bookingDateTime);
+        if (isNaN(startDate.getTime())) {
+            setBookingFeedback({
+                type: "error",
+                message: "Selecciona una fecha y hora de inicio validas."
+            });
+            return;
+        }
+
+        if (bookingDuration <= 0) {
+            setBookingFeedback({
+                type: "error",
+                message: "La duracion en minutos debe ser mayor que 0."
+            });
+            return;
+        }
+
+        setIsCreatingBooking(true);
+        setBookingFeedback(null);
+
+        const endDate = new Date(startDate.getTime() + bookingDuration * 60000);
+        const startIso = startDate.toISOString();
+        const endIso = endDate.toISOString();
+        const woGuid = cleanGuid(bookingWo.id);
+        const resGuid = cleanGuid(selectedResourceId);
+        const statusGuid = cleanGuid(selectedBookingStatusId);
+
+        if (isMockData || bookingWo.id.startsWith("mock-")) {
+            setTimeout(() => {
+                setIsCreatingBooking(false);
+                setBookingFeedback({
+                    type: "success",
+                    message: `Reserva creada (Modo Demo) para ${bookingWo.name} el ${startDate.toLocaleString()} (${bookingDuration} min).`
+                });
+            }, 400);
+            return;
+        }
+
+        try {
+            const primaryPayload = buildBookingPayload(
+                "msdyn_workorder",
+                "Resource",
+                "BookingStatus",
+                bookingWo.name,
+                woGuid,
+                resGuid,
+                statusGuid,
+                startIso,
+                endIso,
+                bookingDuration
+            );
+
+            const result = await context.webAPI.createRecord(
+                "bookableresourcebooking",
+                primaryPayload
+            );
+
+            setBookingFeedback({
+                type: "success",
+                message: `Reserva creada correctamente en Dataverse (ID: ${result.id}).`
+            });
+        } catch (primaryErr: unknown) {
+            try {
+                const fallbackPayload = buildBookingPayload(
+                    "msdyn_workorder",
+                    "resource",
+                    "bookingstatus",
+                    bookingWo.name,
+                    woGuid,
+                    resGuid,
+                    statusGuid,
+                    startIso,
+                    endIso,
+                    bookingDuration
+                );
+
+                const fallbackResult = await context.webAPI.createRecord(
+                    "bookableresourcebooking",
+                    fallbackPayload
+                );
+
+                setBookingFeedback({
+                    type: "success",
+                    message: `Reserva creada correctamente en Dataverse (ID: ${fallbackResult.id}).`
+                });
+            } catch {
+                const formattedErr = formatUnknownError(primaryErr);
+                setBookingFeedback({
+                    type: "error",
+                    message: `No se pudo crear la reserva: ${formattedErr.message}`
+                });
+            }
+        } finally {
+            setIsCreatingBooking(false);
+        }
+    };
+
     const renderCellButton = (
         zone: string | null,
         seOrPci: CategoryType,
@@ -622,6 +1036,65 @@ export const TablaDobleEntrada: React.FC<ITablaDobleEntradaProps> = ({
         );
     };
 
+    const renderMultiSelect = (
+        menuKey: "type" | "province" | "city",
+        placeholder: string,
+        selectedKeys: string[],
+        options: IFilterOption[],
+        setter: React.Dispatch<React.SetStateAction<string[]>>
+    ): React.ReactNode => {
+        const isOpen = openMenu === menuKey;
+        const summary = getSummaryText(selectedKeys, options, placeholder);
+
+        return (
+            <div className="sec-tv-multiselect">
+                <button
+                    type="button"
+                    className="sec-tv-multiselect-trigger"
+                    onClick={() => setOpenMenu(isOpen ? null : menuKey)}
+                >
+                    <span
+                        className={
+                            selectedKeys.length === 0
+                                ? "sec-tv-multiselect-placeholder"
+                                : "sec-tv-multiselect-value"
+                        }
+                    >
+                        {summary}
+                    </span>
+                    <span className="sec-tv-multiselect-chevron">v</span>
+                </button>
+
+                {isOpen && (
+                    <div className="sec-tv-multiselect-menu">
+                        {options.length === 0 ? (
+                            <div className="sec-tv-multiselect-empty">
+                                Sin opciones disponibles
+                            </div>
+                        ) : (
+                            options.map((opt) => {
+                                const isChecked = selectedKeys.includes(opt.key);
+                                return (
+                                    <label
+                                        key={opt.key}
+                                        className="sec-tv-multiselect-option"
+                                    >
+                                        <input
+                                            type="checkbox"
+                                            checked={isChecked}
+                                            onChange={() => toggleSelection(opt.key, setter)}
+                                        />
+                                        <span>{opt.text}</span>
+                                    </label>
+                                );
+                            })
+                        )}
+                    </div>
+                )}
+            </div>
+        );
+    };
+
     const dateFieldUsed =
         countryEnvironment === "Espana"
             ? "pdw_mmexpirationdate"
@@ -633,7 +1106,7 @@ export const TablaDobleEntrada: React.FC<ITablaDobleEntradaProps> = ({
                 <div className="sec-tv-title-group">
                     <h2 className="sec-tv-title">Control de Ordenes de Trabajo</h2>
                     <div className="sec-tv-subtitle">
-                        <span>Distribucion por Zona, Especialidad (SE / PCI) y Vencimiento</span>
+                        <span>Distribucion por Zona, Especialidad (SE / PCI) y Vencimiento (Sin programar)</span>
                         <button
                             type="button"
                             className={
@@ -651,64 +1124,40 @@ export const TablaDobleEntrada: React.FC<ITablaDobleEntradaProps> = ({
                     </div>
                 </div>
 
-                <div className="sec-tv-filter-bar">
-                    <div className="sec-tv-filter-label-box">Filtro</div>
+                <div className="sec-tv-filter-bar" ref={filterBarRef}>
+                    <div className="sec-tv-filter-label-box">Filtros</div>
 
-                    <div className="sec-tv-multiselect" ref={dropdownRef}>
-                        <button
-                            type="button"
-                            className="sec-tv-multiselect-trigger"
-                            onClick={() => setIsDropdownOpen((prev) => !prev)}
-                        >
-                            <span
-                                className={
-                                    selectedTypes.length === 0
-                                        ? "sec-tv-multiselect-placeholder"
-                                        : "sec-tv-multiselect-value"
-                                }
-                            >
-                                {selectedSummaryText}
-                            </span>
-                            <span className="sec-tv-multiselect-chevron">v</span>
-                        </button>
+                    {renderMultiSelect(
+                        "type",
+                        "Tipo de Orden de trabajo",
+                        selectedTypes,
+                        workOrderTypeOptions,
+                        setSelectedTypes
+                    )}
 
-                        {isDropdownOpen && (
-                            <div className="sec-tv-multiselect-menu">
-                                {workOrderTypeOptions.length === 0 ? (
-                                    <div className="sec-tv-multiselect-empty">
-                                        Sin opciones disponibles
-                                    </div>
-                                ) : (
-                                    workOrderTypeOptions.map((opt) => {
-                                        const isChecked = selectedTypes.includes(opt.key);
-                                        return (
-                                            <label
-                                                key={opt.key}
-                                                className="sec-tv-multiselect-option"
-                                            >
-                                                <input
-                                                    type="checkbox"
-                                                    checked={isChecked}
-                                                    onChange={() =>
-                                                        toggleWorkOrderType(opt.key)
-                                                    }
-                                                />
-                                                <span>{opt.text}</span>
-                                            </label>
-                                        );
-                                    })
-                                )}
-                            </div>
-                        )}
-                    </div>
+                    {renderMultiSelect(
+                        "province",
+                        "Provincia",
+                        selectedProvinces,
+                        provinceOptions,
+                        setSelectedProvinces
+                    )}
 
-                    {selectedTypes.length > 0 && (
+                    {renderMultiSelect(
+                        "city",
+                        "Ciudad",
+                        selectedCities,
+                        cityOptions,
+                        setSelectedCities
+                    )}
+
+                    {totalActiveFilters > 0 && (
                         <button
                             type="button"
                             className="sec-tv-clear-btn"
-                            onClick={() => setSelectedTypes([])}
+                            onClick={clearAllFilters}
                         >
-                            Limpiar ({selectedTypes.length})
+                            Limpiar ({totalActiveFilters})
                         </button>
                     )}
 
@@ -737,7 +1186,7 @@ export const TablaDobleEntrada: React.FC<ITablaDobleEntradaProps> = ({
                 {isLoading ? (
                     <div className="sec-tv-loading">
                         <div className="sec-tv-spinner" />
-                        <span>Cargando ordenes de trabajo...</span>
+                        <span>Cargando ordenes de trabajo sin programar...</span>
                     </div>
                 ) : (
                     <div className="sec-tv-table-scroll">
@@ -1036,7 +1485,7 @@ export const TablaDobleEntrada: React.FC<ITablaDobleEntradaProps> = ({
 
                 <div className="sec-tv-footer-meta">
                     <span className="sec-tv-rule-info">
-                        Regla fecha: {dateFieldUsed} | Umbral riesgo: &lt;= {riskDaysThreshold} dias | Agrupacion zona: {zoneFieldLogicalName}
+                        Filtro: Sin programar (690970000) | Regla fecha: {dateFieldUsed} | Umbral riesgo: &lt;= {riskDaysThreshold} dias
                     </span>
                     <span className="sec-tv-version">v{version}</span>
                 </div>
@@ -1074,7 +1523,7 @@ export const TablaDobleEntrada: React.FC<ITablaDobleEntradaProps> = ({
                             <input
                                 type="text"
                                 className="sec-tv-search-input"
-                                placeholder="Buscar por N OT, Job No, Cliente, Tipo, Subestado o Ciudad..."
+                                placeholder="Buscar por N OT, Job No, Cliente, Tipo, Subestado, Provincia o Ciudad..."
                                 value={drillSearch}
                                 onChange={(e) => setDrillSearch(e.target.value)}
                             />
@@ -1090,10 +1539,10 @@ export const TablaDobleEntrada: React.FC<ITablaDobleEntradaProps> = ({
                                         <th>Tipo OT</th>
                                         <th>Esp.</th>
                                         <th>Estado / Subestado</th>
-                                        <th>Zona / Ciudad</th>
+                                        <th>Provincia / Ciudad</th>
                                         <th>Fecha Limite</th>
                                         <th>Dias</th>
-                                        <th>Accion</th>
+                                        <th>Acciones</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -1140,7 +1589,7 @@ export const TablaDobleEntrada: React.FC<ITablaDobleEntradaProps> = ({
                                                         {wo.systemStatus} / {wo.subStatus}
                                                     </td>
                                                     <td>
-                                                        {wo.zone} ({wo.city})
+                                                        {wo.province} ({wo.city})
                                                     </td>
                                                     <td>{formatDateDisplay(wo.targetDateUsed)}</td>
                                                     <td>
@@ -1149,21 +1598,33 @@ export const TablaDobleEntrada: React.FC<ITablaDobleEntradaProps> = ({
                                                         </span>
                                                     </td>
                                                     <td>
-                                                        <button
-                                                            type="button"
-                                                            className="sec-tv-open-wo-btn"
-                                                            disabled={wo.id.startsWith("mock-")}
-                                                            onClick={() =>
-                                                                handleOpenWorkOrderForm(wo.id)
-                                                            }
-                                                            title={
-                                                                wo.id.startsWith("mock-")
-                                                                    ? "Registro de demostracion"
-                                                                    : "Abrir formulario de la OT"
-                                                            }
-                                                        >
-                                                            Abrir OT
-                                                        </button>
+                                                        <div className="sec-tv-actions-cell">
+                                                            <button
+                                                                type="button"
+                                                                className="sec-tv-open-wo-btn"
+                                                                disabled={wo.id.startsWith("mock-")}
+                                                                onClick={() =>
+                                                                    handleOpenWorkOrderForm(wo.id)
+                                                                }
+                                                                title={
+                                                                    wo.id.startsWith("mock-")
+                                                                        ? "Registro de demostracion"
+                                                                        : "Abrir formulario de la OT"
+                                                                }
+                                                            >
+                                                                Abrir
+                                                            </button>
+                                                            <button
+                                                                type="button"
+                                                                className="sec-tv-book-wo-btn"
+                                                                onClick={() =>
+                                                                    void openBookingModal(wo)
+                                                                }
+                                                                title="Reservar recurso del mismo territorio"
+                                                            >
+                                                                Reservar
+                                                            </button>
+                                                        </div>
                                                     </td>
                                                 </tr>
                                             );
@@ -1171,6 +1632,170 @@ export const TablaDobleEntrada: React.FC<ITablaDobleEntradaProps> = ({
                                     )}
                                 </tbody>
                             </table>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* POPUP ANIDADO DE RESERVA DE RECURSO */}
+            {bookingWo !== null && (
+                <div
+                    className="sec-tv-modal-overlay sec-tv-modal-nested-overlay"
+                    onClick={() => setBookingWo(null)}
+                >
+                    <div
+                        className="sec-tv-modal-window sec-tv-modal-small"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="sec-tv-modal-header">
+                            <div>
+                                <h3 className="sec-tv-modal-title">
+                                    Reservar Orden de Trabajo: {bookingWo.name}
+                                </h3>
+                                <span className="sec-tv-modal-subtitle">
+                                    Territorio de la OT: {bookingWo.territoryName} ({bookingWo.zone})
+                                </span>
+                            </div>
+                            <button
+                                type="button"
+                                className="sec-tv-modal-close"
+                                onClick={() => setBookingWo(null)}
+                            >
+                                X
+                            </button>
+                        </div>
+
+                        <div className="sec-tv-modal-body sec-tv-booking-form">
+                            {isLoadingResources ? (
+                                <div className="sec-tv-loading">
+                                    <div className="sec-tv-spinner" />
+                                    <span>
+                                        Buscando recursos en msdyn_resourceterritory...
+                                    </span>
+                                </div>
+                            ) : (
+                                <>
+                                    <div className="sec-tv-form-field">
+                                        <label className="sec-tv-form-label">
+                                            Recurso (Mismo Resource Territory):
+                                        </label>
+                                        <select
+                                            className="sec-tv-form-select"
+                                            value={selectedResourceId}
+                                            onChange={(e) =>
+                                                setSelectedResourceId(e.target.value)
+                                            }
+                                        >
+                                            {territoryResources.length === 0 ? (
+                                                <option value="">
+                                                    -- Sin recursos en este territorio --
+                                                </option>
+                                            ) : (
+                                                territoryResources.map((res) => (
+                                                    <option
+                                                        key={res.resourceId}
+                                                        value={res.resourceId}
+                                                    >
+                                                        {res.resourceName} ({res.territoryName})
+                                                    </option>
+                                                ))
+                                            )}
+                                        </select>
+                                    </div>
+
+                                    {bookingStatuses.length > 0 && (
+                                        <div className="sec-tv-form-field">
+                                            <label className="sec-tv-form-label">
+                                                Estado de la Reserva:
+                                            </label>
+                                            <select
+                                                className="sec-tv-form-select"
+                                                value={selectedBookingStatusId}
+                                                onChange={(e) =>
+                                                    setSelectedBookingStatusId(e.target.value)
+                                                }
+                                            >
+                                                {bookingStatuses.map((st) => (
+                                                    <option
+                                                        key={st.statusId}
+                                                        value={st.statusId}
+                                                    >
+                                                        {st.statusName}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                    )}
+
+                                    <div className="sec-tv-form-row">
+                                        <div className="sec-tv-form-field">
+                                            <label className="sec-tv-form-label">
+                                                Dia y Hora de la Reserva:
+                                            </label>
+                                            <input
+                                                type="datetime-local"
+                                                className="sec-tv-form-input"
+                                                value={bookingDateTime}
+                                                onChange={(e) =>
+                                                    setBookingDateTime(e.target.value)
+                                                }
+                                            />
+                                        </div>
+
+                                        <div className="sec-tv-form-field">
+                                            <label className="sec-tv-form-label">
+                                                Duracion (minutos):
+                                            </label>
+                                            <input
+                                                type="number"
+                                                min={1}
+                                                step={15}
+                                                className="sec-tv-form-input"
+                                                value={bookingDuration}
+                                                onChange={(e) =>
+                                                    setBookingDuration(
+                                                        Number(e.target.value)
+                                                    )
+                                                }
+                                            />
+                                        </div>
+                                    </div>
+
+                                    {bookingFeedback && (
+                                        <div
+                                            className={
+                                                bookingFeedback.type === "success"
+                                                    ? "sec-tv-success-banner"
+                                                    : "sec-tv-error-banner"
+                                            }
+                                        >
+                                            {bookingFeedback.message}
+                                        </div>
+                                    )}
+                                </>
+                            )}
+                        </div>
+
+                        <div className="sec-tv-modal-footer">
+                            <button
+                                type="button"
+                                className="sec-tv-cancel-btn"
+                                onClick={() => setBookingWo(null)}
+                            >
+                                Cancelar
+                            </button>
+                            <button
+                                type="button"
+                                className="sec-tv-confirm-book-btn"
+                                disabled={
+                                    isLoadingResources ||
+                                    isCreatingBooking ||
+                                    territoryResources.length === 0
+                                }
+                                onClick={() => void handleCreateBooking()}
+                            >
+                                {isCreatingBooking ? "Creando..." : "Crear Reserva"}
+                            </button>
                         </div>
                     </div>
                 </div>

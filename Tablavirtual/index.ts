@@ -2,7 +2,7 @@ import { IInputs, IOutputs } from "./generated/ManifestTypes";
 import * as React from "react";
 import { TablaDobleEntrada, ITablaDobleEntradaProps } from "./components/TablaDobleEntrada";
 
-const CONTROL_VERSION = "1.0.4";
+const CONTROL_VERSION = "1.0.7";
 
 export class Tablavirtual implements ComponentFramework.ReactControl<IInputs, IOutputs> {
     private notifyOutputChanged: () => void;

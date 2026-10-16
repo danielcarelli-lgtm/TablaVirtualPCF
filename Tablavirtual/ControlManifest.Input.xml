@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8" ?>
 <manifest>
-  <control namespace="sec" constructor="Tablavirtual" version="1.0.4" display-name-key="Tablavirtual" description-key="Tablero de control de Ordenes de Trabajo de doble entrada (SE / PCI por Zona)" control-type="virtual" >
+  <control namespace="sec" constructor="Tablavirtual" version="1.0.7" display-name-key="Tablavirtual" description-key="Tablero de control de Ordenes de Trabajo de doble entrada (SE / PCI por Zona)" control-type="virtual" >
     <external-service-usage enabled="false">
     </external-service-usage>
     
