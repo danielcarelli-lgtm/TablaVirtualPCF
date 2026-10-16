@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<manifest>
+  <control namespace="sec" constructor="Tablavirtual" version="1.0.4" display-name-key="Tablavirtual" description-key="Tablero de control de Ordenes de Trabajo de doble entrada (SE / PCI por Zona)" control-type="virtual" >
+    <external-service-usage enabled="false">
+    </external-service-usage>
+    
+    <!-- Campo ancla requerido por el template Field -->
+    <property name="sampleProperty" display-name-key="Campo Ancla" description-key="Campo del formulario donde se aloja el control" of-type="SingleLine.Text" usage="bound" required="true" />
+    
+    <!-- Parámetros de regla de negocio -->
+    <property name="countryEnvironment" display-name-key="Entorno País (Espana / Otros)" description-key="Define si usa pdw_mmexpirationdate (Espana) o msdyn_timetopromised" of-type="SingleLine.Text" usage="input" required="false" default-value="Espana" />
+    <property name="riskDaysThreshold" display-name-key="Umbral Días En Riesgo" description-key="Cantidad de días restantes (0 a N) para considerar una OT En Riesgo" of-type="Whole.None" usage="input" required="false" default-value="7" />
+    <property name="zoneFieldLogicalName" display-name-key="Campo de Zona" description-key="Nombre lógico del campo para agrupar filas (_msdyn_serviceterritory_value, msdyn_stateorprovince, _owningbusinessunit_value)" of-type="SingleLine.Text" usage="input" required="false" default-value="_msdyn_serviceterritory_value" />
+
+    <resources>
+      <code path="index.ts" order="1"/>
+      <css path="css/Tablavirtual.css" order="1" />
+      <platform-library name="React" version="16.8.6" />
+      <platform-library name="Fluent" version="8.29.0" />
+    </resources>
+    
+    <feature-usage>
+      <uses-feature name="WebAPI" required="true" />
+    </feature-usage>
+  </control>
+</manifest>
